@@ -13,10 +13,15 @@ I've also made two layers - joinlayer and splitlayer - that might be useful util
 Also, if you want to split your raw text into word tokens instead of characters, I have made that particularly easy. 
 
 Granted, none of this is really, uh, user friendly yet. If you want to use it, here's how you do:
+
 	+ require 'seq2seq'
+
 	+ build out your list of args, read comments in seq2seq to see what your options are
+
 	+ init(args)
+
 	+ then to train, run 'train_network_N_steps(N)' with some number as the argument
+
 	+ to sample, run 'sample_from_network(length)' with some number as the argument
 
 There's no way to save/load networks yet, or run this from a command line. And again: doesn't do seq2seq yet. But, these things, they are coming. They will be here eventually.
