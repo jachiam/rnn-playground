@@ -27,7 +27,7 @@ function joinlayer:__init()
 end
 
 
-function joinlayer:forward(input)
+function joinlayer:updateOutput(input)
 	local X = input
 	local splitSizes = {}
 
@@ -78,10 +78,6 @@ function joinlayer:forward(input)
 	end
 
 	return self.output
-end
-
-function joinlayer:updateOutput(input)
-	return self:forward(input)
 end
 
 function joinlayer:updateGradInput(input,gradOutput)

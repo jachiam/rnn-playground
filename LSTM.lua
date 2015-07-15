@@ -3,6 +3,7 @@ require 'nn'
 require 'nngraph'
 require 'joinlayer'
 require 'splitlayer'
+require 'peephole_layer'
 
 -- layer_sizes is a table whose entries are the number of cells per layer
 
@@ -73,21 +74,36 @@ function LSTM(input_dim,layer_sizes, peepholes, decoder)
 		local all = nn.CAddTable()({i2h,h2h})
 
 		local sizes = {layer_sizes[j], layer_sizes[j], layer_sizes[j], layer_sizes[j]}
-		local zbar, ibar, fbar, obar, z, i, f, o
+		local zbar, ibar, fbar, obar, z, i, f, o, p_i, p_f, p_o
 		zbar, ibar, fbar, obar = nn.SplitLayer(4*layer_sizes[j],sizes)(all):split(4)
 
-			-- TO DO: ADD PEEPHOLE CONNECTIONS
-
+		-- Input Block
 		z = nn.Tanh()(zbar)
-		i = nn.Sigmoid()(ibar)
-		f = nn.Sigmoid()(fbar)
-		o = nn.Sigmoid()(obar)
 
-		-- hidden_states_cur[i + #layer_sizes] is c_t for this layer
+		-- Input and Forget Gates
+		if not(peep) then
+			i = nn.Sigmoid()(ibar)
+			f = nn.Sigmoid()(fbar)
+		else
+			p_i = nn.PeepLayer(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
+			p_f = nn.PeepLayer(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
+			i = nn.Sigmoid()(nn.CAddTable()({ibar,p_f}))
+			f = nn.Sigmoid()(nn.CAddTable()({fbar,p_f}))
+		end
+
+		-- hidden_states_cur[j + #layer_sizes] is c_t for this layer
 		hidden_states_cur[j + #layer_sizes] = nn.CAddTable()({
 			nn.CMulTable()({z,i}), 
 			nn.CMulTable()({f,hidden_states_prev[j + #layer_sizes]})
 			})
+
+		-- Output Gate
+		if not(peep) then
+			o = nn.Sigmoid()(obar)
+		else
+			p_o = nn.PeepLayer(layer_sizes[j])(hidden_states_cur[j+#layer_sizes])
+			o = nn.Sigmoid()(nn.CAddTable()({obar,p_o}))
+		end
 
 		-- now make h_t for this layer
 		hidden_states_cur[j] = nn.CMulTable()({

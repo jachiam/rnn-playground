@@ -36,8 +36,8 @@ function splitlayer:__init(N,splitSizes)
 	self.gradInput = torch.Tensor()
 end
 
-function splitlayer:forward(x)
-	local x = x
+function splitlayer:updateOutput(input)
+	local x = input
 
 	local ptr = 1
 
@@ -51,10 +51,6 @@ function splitlayer:forward(x)
 	end
 
 	return self.output
-end
-
-function splitlayer:updateOutput(input)
-	return self:forward(input)
 end
 
 function splitlayer:updateGradInput(input,gradOutput)
