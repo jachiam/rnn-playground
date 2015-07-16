@@ -34,7 +34,7 @@ function init(args)
 
 	-- Computational
 	s2s.gpu = args.gpu or -1
-	s2s.batch_size = args.batch_size or 50
+	s2s.batch_size = args.batch_size or 30
 	s2s.seq_len = args.seq_len or 50
 	s2s.collect_often = args.collect_often or false
 
@@ -47,13 +47,15 @@ function init(args)
 
 	-- Data
 	s2s.pattern = args.pattern or '.'
-	if s2s.pattern = 'word' then
+	if s2s.pattern == 'word' then
 		s2s.pattern = '%a+\'?%a+'
 	end
-	s2s.lower = args.lower or true
-	s2s.rawdata = args.rawdata or data()
+	s2s.lower = args.lower or false
+	s2s.filename = args.filename or 'input.txt'
+	s2s.rawdata = args.rawdata or data(s2s.filename)
 	print('Creating embedding/deembedding tables for characters in data...')
-	s2s.embed, s2s.deembed, s2s.numkeys, s2s.numwords, s2s.embedded_data = data_processing(s2s.rawdata,s2s.pattern)
+	s2s.embed, s2s.deembed, s2s.numkeys, s2s.numwords, s2s.tokenized = data_processing(s2s.rawdata,s2s.pattern)
+	s2s.numkeys = s2s.numkeys + 1 		-- for unknown character
 	s2s.eye = torch.eye(s2s.numkeys)
 	print('Finished making embed/deembed tables.') 
 	print('Finished making embedded data.')
@@ -67,7 +69,7 @@ function init(args)
 	print('Making LSTM...')
 	protos = {}
 	clones = {}
-	protos.LSTM = LSTM(s2s.numkeys,s2s.layer_sizes,s2s.peepholes,true)
+	protos.LSTM = args.LSTM or LSTM(s2s.numkeys,s2s.layer_sizes,s2s.peepholes,true)
 	if s2s.gpu >= 0 then protos.LSTM:cuda() end
 	s2s.params, s2s.gradparams = protos.LSTM:getParameters()
 	s2s.v = s2s.gradparams:clone():zero()
@@ -98,8 +100,8 @@ end
 
 
 -- DATA MANIPULATION FUNCTIONS
-function data()
-	local f = torch.DiskFile('input.txt')
+function data(filename)
+	local f = torch.DiskFile(filename)
 	local rawdata = f:readString('*a')
 	f:close()
 	return rawdata
@@ -185,9 +187,9 @@ function minibatch_loader()
 
 	for n=1,s2s.batch_size do
 		i = torch.ceil(torch.uniform()*(s2s.numwords - s2s.seq_len))
-		preX = s2s.embedded_data[{{i,i + s2s.seq_len - 1}}]:long()
+		preX = s2s.tokenized[{{i,i + s2s.seq_len - 1}}]:long()
 		X[{{},{n}}]:copy(s2s.eye:index(1,preX))
-		Y[{{},{n}}] = s2s.embedded_data[{{i+1,i + s2s.seq_len}}]
+		Y[{{},{n}}] = s2s.tokenized[{{i+1,i + s2s.seq_len}}]
 	end
 
 	if s2s.gpu >= 1 then
@@ -229,32 +231,126 @@ function train_network_N_steps(N)
 	end
 end
 
+-- SAMPLING
 
-function sample_from_network(length)
+function tokenize_string(text)
+	local breakapart = text:gmatch(s2s.pattern)
+	local numtokens = 0
+	for token in breakapart do
+		numtokens = numtokens + 1
+	end
+
+	local tokenized = torch.zeros(numtokens)
+	breakapart = text:gmatch(s2s.pattern)
+	local i = 1
+	for token in breakapart do
+		if s2s.lower then
+			tokenized[i] = s2s.embed[token:lower()] or s2s.numkeys
+		else
+			tokenized[i] = s2s.embed[token] or s2s.numkeys
+		end
+		i = i + 1
+	end
+	return tokenized:long(), numtokens
+end
+
+function string_to_one_hot(text)
+	local tokenized, numtokens = tokenize_string(text)
+	local one_hots = torch.zeros(numtokens,s2s.numkeys)
+	one_hots:copy(s2s.eye:index(1,tokenized))
+	return one_hots
+end
+
+function sample_from_network(args)
+	local X, xcur, hcur
+	local length = args.length
+	local toscreen = args.toscreen or false
+	local primetext = args.primetext
 	sample_text = ''
-	i = torch.ceil(torch.uniform()*s2s.numkeys)
+
 	xcur = torch.Tensor(s2s.numkeys):zero()
-	hcur = torch.Tensor(s2s.n_hidden):zero()
+	hcur = args.hcur or torch.Tensor(s2s.n_hidden):zero()
 	softmax = nn.SoftMax()
 	if s2s.gpu >= 1 then
 		xcur = xcur:float():cuda()
 		hcur = hcur:float():cuda()
 		softmax:cuda()
 	end
-	xcur[i] = 1
-	for n=1,length do
-		sample_text = sample_text .. s2s.deembed[i]
-		protos.LSTM:forward({hcur,xcur})
-		hcur = protos.LSTM.output[1]
-		pred = protos.LSTM.output[2]
-		probs = softmax:forward(pred)
-		probs:div(torch.sum(probs))
-		next_char = torch.multinomial(probs:float(), 1):resize(1):float()
-		i = next_char[1]
-		xcur:zero()
+
+	if not(primetext) then
+		i = torch.ceil(torch.uniform()*s2s.numkeys)
 		xcur[i] = 1
+	else
+		X = string_to_one_hot(primetext)
+		if s2s.gpu >=1 then
+			X = X:cuda()
+		end
+		for n=1,X:size()[1] do
+			protos.LSTM:forward({hcur,X[n]})
+			hcur = protos.LSTM.output[1]
+		end
+		xcur[s2s.embed['\n']] = 1
 	end
-	print('Sample text: ',sample_text)
+
+	local function next_character(pred)
+		local probs = softmax:forward(pred)
+		if args.temperature then
+			local logprobs = torch.log(probs)
+			logprobs:div(args.temperature)
+			probs = torch.exp(logprobs)
+		end
+		probs:div(torch.sum(probs))
+		local next_char = torch.multinomial(probs:float(), 1):resize(1):float()
+		local i = next_char[1]
+		local next_text = s2s.deembed[i] or ''
+		return i, next_text
+	end
+
+	if length then
+		for n=1,length do
+			protos.LSTM:forward({hcur,xcur})
+			hcur = protos.LSTM.output[1]
+			pred = protos.LSTM.output[2]
+			i, next_text = next_character(pred)
+			xcur:zero()
+			xcur[i] = 1
+			sample_text = sample_text .. next_text
+		end
+	else
+		repeat
+			protos.LSTM:forward({hcur,xcur})
+			hcur = protos.LSTM.output[1]
+			pred = protos.LSTM.output[2]
+			i, next_text = next_character(pred)
+			xcur:zero()
+			xcur[i] = 1
+			sample_text = sample_text .. next_text
+		until next_text == '\n'	-- output character is unknown/EOS
+	end
+
+	if toscreen then
+		print('Sample text: ',sample_text)
+	end
+	return sample_text, hcur
+end
+
+function test_conv(temperature)
+	local user_input
+	local args
+	local hcur = torch.Tensor(s2s.n_hidden):zero()
+	repeat
+		user_input = io.read()
+		io.write('\n')
+		io.flush()
+		if not(user_input) then
+			user_input = '\n'
+		end
+		args = {hcur = hcur, toscreen=false, primetext = user_input, temperature = temperature}
+		--if length then args.length = length end
+		machine_output, hcur = sample_from_network(args)
+		io.write('Machine: ' .. machine_output .. '\n')
+		io.flush()
+	until user_input=="quit"
 end
 
 function memory()
