@@ -60,6 +60,7 @@ end
 
 function process_write_GSAR(rawdata,mode)
 	local f = torch.DiskFile('test_output.txt','rw')
+	f:seekEnd()
 	f:writeString('\n')
 
 	local breakapart = rawdata:gmatch('%([^\n]+%),\n')	-- old pattern that mostly worked was '%b(),\n'
@@ -132,6 +133,7 @@ end
 
 function write_test()
 	local f = torch.DiskFile('test_output.txt','rw')
+	f:seekEnd()
 	_,_,messages = process_GSAR(rawdata)
 	f:writeString('\n')
 	for i=1,#messages do

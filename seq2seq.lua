@@ -37,6 +37,7 @@ function init(args)
 	s2s.batch_size = args.batch_size or 30
 	s2s.seq_len = args.seq_len or 50
 	s2s.collect_often = args.collect_often or false
+	s2s.noclones = args.noclones or false
 
 	-- RMSprop and clipping gradients
 	s2s.lr = args.lr or 0.1		-- learning rate
@@ -73,9 +74,11 @@ function init(args)
 	if s2s.gpu >= 0 then protos.LSTM:cuda() end
 	s2s.params, s2s.gradparams = protos.LSTM:getParameters()
 	s2s.v = s2s.gradparams:clone():zero()
-	print('Cloning LSTM...')
-	clones.LSTM = model_utils.clone_many_times(protos.LSTM,s2s.seq_len)
-	collectgarbage()
+	if not(s2s.noclones) then
+		print('Cloning LSTM...')
+		clones.LSTM = model_utils.clone_many_times(protos.LSTM,s2s.seq_len)
+		collectgarbage()
+	end
 	print('LSTM is done.')
 
 	print('Making criterion...')
@@ -85,9 +88,11 @@ function init(args)
 	criterion_out = nn.ClassNLLCriterion()({nn.LogSoftMax()(criterion_input_1),criterion_input_2})
 	protos.criterion = nn.gModule({criterion_input_1,criterion_input_2},{criterion_out})
 	if s2s.gpu >= 0 then protos.criterion:cuda() end
-	print('Cloning criterion...')
-	clones.criterion = model_utils.clone_many_times(protos.criterion,s2s.seq_len)
-	collectgarbage()
+	if not(s2s.noclones) then
+		print('Cloning criterion...')
+		clones.criterion = model_utils.clone_many_times(protos.criterion,s2s.seq_len)
+		collectgarbage()
+	end
 	print('Criterion is done.')
 	
 	if s2s.gpu >=0 then
@@ -176,6 +181,33 @@ function bwd()
 	end
 end
 
+function train_pass_no_clones()
+	total_loss = 0
+
+	outputs = {}
+	-- fwd pass to get the outputs and hidden states
+	for i=1,s2s.seq_len do
+		protos.LSTM:forward({H[i],X[i]})
+		if i < s2s.seq_len then H[i+1] = protos.LSTM.output[1] end
+		outputs[i] = protos.LSTM.output[2]
+	end
+
+	gradInputs = {}
+	-- bwd pass
+	for i=s2s.seq_len,1,-1 do
+		loss = protos.criterion:forward({outputs[i],Y[i]})
+		total_loss = total_loss + loss[1]
+		protos.criterion:backward({outputs[i],Y[i]},{1})
+		protos.LSTM:forward({H[i],X[i]})
+		if i < s2s.seq_len then
+			protos.LSTM:backward({H[i],X[i]},{gradInputs[i], protos.criterion.gradInput[1]})
+		else
+			protos.LSTM:backward({H[i],X[i]},{torch.Tensor():typeAs(H[i]):resizeAs(H[i]):zero(),protos.criterion.gradInput[1]})
+		end
+		gradInputs[i-1] = protos.LSTM.gradInput[1]
+	end
+end
+
 -- First index is time slice
 -- Second is element-in-batch
 function minibatch_loader()
@@ -205,8 +237,14 @@ end
 function train_network_one_step()
 	X,Y,H = minibatch_loader()
 	s2s.gradparams:zero()
-	fwd()
-	bwd()
+
+	if s2s.noclones then
+		train_pass_no_clones()
+	else
+		fwd()
+		bwd()
+	end
+
 	if s2s.grad_clip then
 		s2s.gradparams:clamp(-s2s.clip_to, s2s.clip_to)
 	end
@@ -223,9 +261,15 @@ function train_network_N_steps(N)
 	running_total_loss = 0
 	for n=1,N do
 		train_network_one_step()
+		if n==1 then init_error = total_loss/s2s.seq_len end
+		if total_loss/s2s.seq_len > 3*init_error then
+			print('Error is exploding. Current error: ', total_loss/s2s.seq_len)
+			print('Terminating training here.')
+			break
+		end
 		running_total_loss = running_total_loss + total_loss/s2s.seq_len
 		if n % s2s.report_freq == 0 then 
-			print('Average Error: ',running_total_loss/s2s.report_freq) 
+			print('Average Error: ',running_total_loss/s2s.report_freq,'Num Steps: ',n) 
 			running_total_loss = 0
 		end
 	end
@@ -356,4 +400,19 @@ end
 function memory()
 	free,tot = cutorch.getMemoryUsage()
 	print(free/tot)
+end
+
+function load(filename)
+	T = torch.load(filename)
+	s2s = T.s2s
+	s2s.LSTM = T.LSTM
+end
+
+function loadJustOptions(filename)
+	T = torch.load(filename)
+	s2s = T.s2s
+end
+
+function save(filename)
+	torch.save(filename .. '.t7',{s2s = s2s, LSTM = protos.LSTM})
 end
