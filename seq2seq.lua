@@ -472,7 +472,7 @@ function load(filename)
 	init(s2s)
 end
 
-function loadJustOptions(filename)
+function loadFromOptions(filename)
 	T = torch.load(filename)
 	s2s = T.s2s
 	s2s.RNN = nil
