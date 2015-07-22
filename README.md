@@ -25,7 +25,7 @@ Granted, none of this is really, uh, user friendly yet. If you want to use it, h
 
 	+ then to train, run 'train_network_N_steps(N)' with some number as the argument
 
-	+ to sample, run 'sample_from_network(length)' with some number as the argument
+	+ to sample, run 'sample_from_network({length=$some_number})' with some number as the argument
 
 	+ if you trained it on a corpus of chat data, try 'test_conv(temperature)' to chat with it!
 

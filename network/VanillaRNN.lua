@@ -9,6 +9,7 @@ function VanillaRNN(input_dim,layer_sizes,opt)
 	local decoder = opt.decoder or false
 	local nl_type = opt.nl_type or 'tanh'
 
+
 	local inputs = {}
 	inputs[1] = nn.Identity()()	-- Hidden state input
 	inputs[2] = nn.Identity()()	-- External input
@@ -63,11 +64,13 @@ function VanillaRNN(input_dim,layer_sizes,opt)
 		hidden_state_output = hidden_states_cur[1]
 	end
 	if not(decoder) then
-		external_output = external_output_base
+		-- I know this looks dumb... but yes, this is intentional.
+		-- There's a dumb error with one-layer nets otherwise.
+		external_output = nn.Identity()(external_output_base)
 	else
 		external_output = nn.Linear(layer_sizes[#layer_sizes],input_dim)(external_output_base)
 	end
 	local outputs = {hidden_state_output,external_output}
-	
+
 	return nn.gModule(inputs,outputs)
 end

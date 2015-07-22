@@ -77,7 +77,9 @@ function GRU(input_dim,layer_sizes,opt)
 		hidden_state_output = hidden_states_cur[1]
 	end
 	if not(decoder) then
-		external_output = external_output_base
+		-- I know this looks dumb... but yes, this is intentional.
+		-- There's a dumb error with one-layer nets otherwise.
+		external_output = nn.Identity()(external_output_base)
 	else
 		external_output = nn.Linear(layer_sizes[#layer_sizes],input_dim)(external_output_base)
 	end
