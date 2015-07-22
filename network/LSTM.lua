@@ -3,34 +3,27 @@ require 'nn'
 require 'nngraph'
 require 'joinlayer'
 require 'splitlayer'
-require 'peephole_layer'
+require 'unbiased_linear'
 
 -- layer_sizes is a table whose entries are the number of cells per layer
+-- fgate_init is a flag: if true, then initialize the forget gate biases to 1
+function LSTM(input_dim,layer_sizes,opt)
+	local peep = opt.peepholes or false
+	local decoder = opt.decoder or false
+	local fgate_init = opt.fgate_init or false
 
-function LSTM(input_dim,layer_sizes, peepholes, decoder)
-	local peep = peepholes or false
-	local decoder = decoder or false
-
-	-- For simplicity, there are two inputs. The hidden state (which includes
+	-- There are two inputs. The hidden state (a vector which includes
 	-- the hidden state at /every/ level, and the memory cells), and the 
 	-- external input.
 
-	-- Okay, so, 'simplicity' may be a lie. It makes things quite hairy in here
-	-- at the start of things, because we have to unpack the hidden state, and
-	-- then repack it later. But it'll make this easy to plug-n-play in a simple
-	-- trainer I've built for another piece of code, which is the point of the 
-	-- exercise. And you should have a very easy time writing your own code to
-	-- train it. 
-
-	-- There'll be two outputs: first, an "external output," which will be the 
-	-- last layer's hidden state (but not its memory cell). This is ostensibly
-	-- what we will send as input to the next network. The second output will be
-	-- the complete updated hidden state (including the hidden state at every
-	-- level, plus memory cells) which you can then feet back into the LSTM as
-	-- input.
-
-	-- If the 'decoder' flag is up, then that means we expect to use the output
-	-- for classification purposes, so we have to put a final-layer decoder in here.
+	-- There'll be two outputs: the first output will be the complete updated 
+	-- hidden state (including the hidden state at every level, plus memory cells)
+	-- which you can then feed back into the LSTM as input. The second is an 
+	-- "external output," which will be the last layer's hidden state 
+	-- (but not its memory cell), unless the decoder flag is up. If the decoder flag
+	-- is up, then we add a final linear layer to the LSTM, of dimension input_dim.
+	-- The external output is ostensibly what we will send as input to the next network,
+	-- or to the cost function. 
 
 	local inputs = {}
 	inputs[1] = nn.Identity()()	-- Hidden state input
@@ -50,6 +43,16 @@ function LSTM(input_dim,layer_sizes, peepholes, decoder)
 	local hidden_split = nn.SplitLayer(2*m,sizes_with_cells)(inputs[1])
 	local hidden_states_prev = {hidden_split:split(2*#layer_sizes)}
 
+	-- utility function: gives node with linear transform of input
+	local function new_input_sum(indim,layer_size,innode,hiddennode,biasflag)
+		local biasflag = biasflag or false
+		local i2h = nn.Linear(indim,layer_size)(innode)
+		local h2h = nn.UnbiasedLinear(layer_size,layer_size)(hiddennode)
+		if biasflag then
+			i2h.data.module.bias:fill(1)
+		end
+		return nn.CAddTable()({i2h,h2h})
+	end
 
 	-- we will assume the following structure in the hidden state:
 	-- the first /k/ entries are the h_j, and the second /k/ entries
@@ -64,44 +67,41 @@ function LSTM(input_dim,layer_sizes, peepholes, decoder)
 			innode = hidden_states_cur[j-1]
 			indim = layer_sizes[j-1]
 		end
-		-- Following the example from Karpathy's code...
-		-- Do all of the linear transforms from input and recurrents in one go.
-		-- The factor of 4 is because there are four linear transformations required:
-		-- One for the input block, z; one for the input gate, i; one for the
-		-- forget gate, f; and one for the output gate, o.
-		local i2h = nn.Linear(indim,4*layer_sizes[j])(innode)
-		local h2h = nn.Linear(layer_sizes[j],4*layer_sizes[j])(hidden_states_prev[j])
-		local all = nn.CAddTable()({i2h,h2h})
 
-		local sizes = {layer_sizes[j], layer_sizes[j], layer_sizes[j], layer_sizes[j]}
 		local zbar, ibar, fbar, obar, z, i, f, o, p_i, p_f, p_o
-		zbar, ibar, fbar, obar = nn.SplitLayer(4*layer_sizes[j],sizes)(all):split(4)
 
-		-- Input Block
+		-- Input block, input gate, forget gate, output gate linear transforms.
+		zbar = new_input_sum(indim,layer_sizes[j],innode,hidden_states_prev[j])
+		ibar = new_input_sum(indim,layer_sizes[j],innode,hidden_states_prev[j])
+		fbar = new_input_sum(indim,layer_sizes[j],innode,hidden_states_prev[j],fgate_init)
+		obar = new_input_sum(indim,layer_sizes[j],innode,hidden_states_prev[j])
+
+		-- Input block nonlinear
 		z = nn.Tanh()(zbar)
 
-		-- Input and Forget Gates
+		-- Input and forget gate nonlinear / and possibly peepholes
 		if not(peep) then
 			i = nn.Sigmoid()(ibar)
 			f = nn.Sigmoid()(fbar)
 		else
-			p_i = nn.PeepLayer(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
-			p_f = nn.PeepLayer(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
+			p_i = nn.CMul(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
+			p_f = nn.CMul(layer_sizes[j])(hidden_states_prev[j+#layer_sizes])
 			i = nn.Sigmoid()(nn.CAddTable()({ibar,p_f}))
 			f = nn.Sigmoid()(nn.CAddTable()({fbar,p_f}))
 		end
 
+		-- Calculate memory cell values
 		-- hidden_states_cur[j + #layer_sizes] is c_t for this layer
 		hidden_states_cur[j + #layer_sizes] = nn.CAddTable()({
 			nn.CMulTable()({z,i}), 
 			nn.CMulTable()({f,hidden_states_prev[j + #layer_sizes]})
 			})
 
-		-- Output Gate
+		-- Output Gate nonlinear / and possibly peepholes
 		if not(peep) then
 			o = nn.Sigmoid()(obar)
 		else
-			p_o = nn.PeepLayer(layer_sizes[j])(hidden_states_cur[j+#layer_sizes])
+			p_o = nn.CMul(layer_sizes[j])(hidden_states_cur[j+#layer_sizes])
 			o = nn.Sigmoid()(nn.CAddTable()({obar,p_o}))
 		end
 

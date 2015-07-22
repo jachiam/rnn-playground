@@ -1,5 +1,4 @@
 require 'nn'
-require 'cutorch'
 
 --[[
 Overview:
