@@ -2,6 +2,7 @@ require 'torch'
 require 'nn'
 require 'nngraph'
 local model_utils = require 'model_utils'
+package.path = package.path .. ";./network/?.lua"
 
 s2s = {}
 
@@ -11,6 +12,8 @@ s2s = {}
 	seq_len
 	collect_often
 	noclones	-- if true, gradients are calculated more slowly but much more memory-efficiently (default false)
+	report_freq
+	conv_verbose	-- if true, when conversing, if input symbol is unknown, declare so
 
 	RNN_type	-- string, determines RNN type. options are 'LSTM', 'GRU', 'Vanilla'.
 
@@ -26,6 +29,8 @@ s2s = {}
 	pattern
 	lower
 	rawdata
+	usemostcommon	-- use only the most common pattern-matching entries in rawdata as input symbols
+	useNmostcommon  -- how many?
 
 	layer_sizes
 	peepholes	-- for LSTM networks
@@ -33,10 +38,9 @@ s2s = {}
 ]]
 function init(args)
 
-	package.path = package.path .. ";./network/?.lua"
-
 	-- Verbosity
 	s2s.report_freq = args.report_freq or 10
+	s2s.conv_verbose = false
 
 	-- Computational
 	s2s.gpu = args.gpu or -1
@@ -52,7 +56,7 @@ function init(args)
 	-- RMSprop and clipping gradients
 	s2s.lr = args.lr or 0.01		-- learning rate
 	s2s.lambda = args.lambda or 1e-8
-	s2s.gamma = args.gamma or 0.4
+	s2s.gamma = args.gamma or 0.95
 	s2s.grad_clip = args.grad_clip or true
 	s2s.clip_to = args.clip_to or 5
 
@@ -61,18 +65,20 @@ function init(args)
 
 	-- Data
 	s2s.pattern = args.pattern or '.'
-	if s2s.pattern == 'word' then
-		s2s.pattern = '%a+\'?%a+'
-	end
 	s2s.lower = args.lower or false
+	s2s.usemostcommon = args.usemostcommon or false
+	s2s.useNmostcommon = args.useNmostcommon or 4500
+	s2s.replace = args.replace or false
+	s2s.wordopt = {usemostcommon = s2s.usemostcommon, useNmostcommon = s2s.useNmostcommon, replace = s2s.replace}
 	s2s.filename = args.filename or 'input.txt'
 	s2s.rawdata = args.rawdata or data(s2s.filename)
 	print('Creating embedding/deembedding tables for characters in data...')
-	s2s.embed, s2s.deembed, s2s.numkeys, s2s.numwords, s2s.tokenized = data_processing(s2s.rawdata,s2s.pattern)
+	s2s.embed, s2s.deembed, s2s.numkeys, s2s.numwords, s2s.tokenized, s2s.freq_data = data_processing(s2s.rawdata,s2s.pattern,s2s.lower,s2s.wordopt)
 	s2s.numkeys = s2s.numkeys + 1 		-- for unknown character
 	s2s.eye = torch.eye(s2s.numkeys)
 	print('Finished making embed/deembed tables.') 
 	print('Finished making embedded data.')
+	print('Dictionary has this many words in it: ',s2s.numkeys)
 
 	-- Networks and parameters
 	s2s.layer_sizes = args.layer_sizes or {128}
@@ -147,41 +153,170 @@ function data(filename)
 	return rawdata
 end
 
-function data_processing(rawdata,pattern)
+function split_string(rawdata,pattern,lower,wordopt)
+	local replace 
+	if wordopt then
+		replace = wordopt.replace or false
+	end
+	if pattern == 'word' then
+		--ptrn = '%w+\'?%w*[%s%p]'
+		ptrn = '[^%s]+\n?'
+	else
+		ptrn = pattern
+	end
+	local breakapart = rawdata:gmatch(ptrn)
+	local splitstring = {}
+	local tokens = {}
+	for elem in breakapart do
+		tokens = {}
+		if lower then elem = elem:lower() end
+		if pattern == 'word' then
+			local pref = {}
+			local front = elem
+			local back = {}
+
+			--[[ strip off newline characters
+			back[1] = elem:sub(elem:len(),elem:len())
+			if back[1] == '\n' then 
+				front = elem:sub(1,elem:len()-1)
+			else
+				front = elem
+			end]]
+
+			-- strip of punctuation characters and newlines
+			for i=1,front:len() do
+				local prevchar = front:sub(1,1)
+				if prevchar:match('[%p\n]') then
+					table.insert(pref,prevchar)
+					front = front:sub(2,front:len())
+				else
+					break
+				end
+			end
+			for i=front:len(),1,-1 do
+				local lastchar = front:sub(front:len(),front:len())
+				if lastchar:match('[%p\n]') then
+					table.insert(back,lastchar)
+					front = front:sub(1,front:len()-1)
+				else
+					break
+				end
+			end
+
+			-- prefix characters/punctuation to tokens
+			for i=1,#pref do
+				tokens[#tokens+1] = pref[i]
+			end
+
+			-- word to token
+			-- time for some common replacements!
+			if replace and front then
+				local asplit = {}
+				local ba = front:gmatch('[^\']+')
+				for a in ba do
+					table.insert(asplit,a)
+				end
+				local replaceflag = false
+				if #asplit > 1 then
+					local prev = asplit[#asplit-1]:lower()
+					local last = asplit[#asplit]:lower()
+					if last == 'll' then
+						asplit[#asplit] = 'will'
+						replaceflag = true
+					elseif last == 'm' then
+						asplit[#asplit] = 'am'
+						replaceflag = true
+					elseif last == 've' then
+						asplit[#asplit] = 'have'
+						replaceflag = true
+					elseif last == 're' then
+						asplit[#asplit] = 'are'
+						replaceflag = true
+					elseif last == 's' then
+						if prev == 'he' or prev == 'she' 
+							or prev == 'that' or prev == 'this'
+							or prev == 'it' or prev == 'how' 
+							or prev == 'why' or prev == 'who'
+							or prev == 'when' or prev == 'what' then
+							asplit[#asplit] = 'is'
+							replaceflag = true
+						end
+					end
+				end
+				if not(replaceflag) then
+					tokens[#tokens+1] = front
+				else
+					for i=1,#asplit do
+						tokens[#tokens+1] = asplit[i]
+					end
+				end
+			else
+				tokens[1] = front
+			end
+
+			--suffic characters/punctuation to tokens
+			for i=#back,1,-1 do
+				tokens[#tokens+1] = back[i]
+			end
+		else
+			tokens[1] = elem
+		end
+		for i,v in pairs(tokens) do table.insert(splitstring,tokens[i]) end
+	end
+	return splitstring
+end
+
+function data_processing(rawdata,pattern,lower,wordopt)
+	local usemostcommon = false
+	local useNmostcommon = 4500
+	if wordopt then
+		usemostcommon = wordopt.usemostcommon or false
+		useNmostcommon = wordopt.useNmostcommon or 4500
+	end
 	local embeddings = {}
 	local deembeddings = {}
+	local freq = {}
 	local numkeys = 0
 	local numwords = 0
-	local breakapart = rawdata:gmatch(pattern)
-	local token
-	for char in breakapart do
-		if s2s.lower then 
-			token = char:lower()
-		else
-			token = char
-		end
-		numwords = numwords + 1
-		if not embeddings[token] then 
+
+	-- split the string and make embeddings/deembeddings/freq
+	local splitstring = split_string(rawdata,pattern,lower,wordopt)
+	numwords = #splitstring
+	tokenized = torch.zeros(numwords)
+	for i=1,numwords do
+		if not embeddings[splitstring[i]] then
 			numkeys = numkeys + 1
-			embeddings[token] = numkeys
-			deembeddings[numkeys] = token
-		end
-	end
-
-	local tokenized = torch.zeros(numwords)
-	local i=1
-	breakapart = rawdata:gmatch(pattern)
-	for char in breakapart do
-		if s2s.lower then 
-			token = char:lower()
+			embeddings[splitstring[i]] = numkeys
+			deembeddings[numkeys] = splitstring[i]
+			freq[numkeys] = {1,numkeys}
 		else
-			token = char
+			freq[embeddings[splitstring[i]]][1] = freq[embeddings[splitstring[i]]][1] + 1
 		end
-		tokenized[i] = embeddings[token]
-		i = i + 1
+		tokenized[i] = embeddings[splitstring[i]]
 	end
 
-	return embeddings, deembeddings, numkeys, numwords, tokenized
+	-- only take the most frequent entries
+	local num_represented = 0
+	if usemostcommon then
+		numkeys = math.min(numkeys,useNmostcommon)
+		table.sort(freq,function(a,b) return a[1]>b[1] end)
+		local new_embed = {}
+		local new_deembed = {}
+		for i=1,numkeys do
+			new_deembed[i] = deembeddings[freq[i][2]]
+			new_embed[new_deembed[i]] = i
+			num_represented = num_represented + freq[i][1]
+		end
+		embeddings = new_embed
+		deembeddings = new_deembed
+		print('Dictionary captures about ', 100*num_represented/numwords, '% of text.')
+		-- rebuild tokenized:
+		for i=1,numwords do
+			tokenized[i] = embeddings[splitstring[i]] or numkeys + 1
+		end
+	end
+
+	return embeddings, deembeddings, numkeys, numwords, tokenized, freq
 end
 
 
@@ -226,6 +361,7 @@ function grad_pass_no_clones()
 		if i < s2s.seq_len then H[i+1] = s2s.RNN.output[1] end
 		outputs[i] = s2s.RNN.output[2]
 	end
+	if s2s.collect_often then collectgarbage() end
 
 	gradInputs = {}
 	-- bwd pass
@@ -241,6 +377,7 @@ function grad_pass_no_clones()
 		end
 		gradInputs[i-1] = s2s.RNN.gradInput[1]
 	end
+	if s2s.collect_often then collectgarbage() end
 end
 
 -- First index is time slice
@@ -296,8 +433,8 @@ function train_network_one_step()
 		bwd()
 	end
 
-	-- Average over batch
-	s2s.gradparams:div(s2s.batch_size)
+	-- Average over batch and sequence length
+	s2s.gradparams:div(s2s.batch_size):div(s2s.seq_len)
 
 	if s2s.grad_clip then
 		s2s.gradparams:clamp(-s2s.clip_to, s2s.clip_to)
@@ -340,23 +477,18 @@ end
 -- SAMPLING
 
 function tokenize_string(text)
-	local breakapart = text:gmatch(s2s.pattern)
-	local numtokens = 0
-	for token in breakapart do
-		numtokens = numtokens + 1
+
+	local splitstring = split_string(text,s2s.pattern,s2s.lower,s2s.wordopt)
+	local numtokens = #splitstring
+	local tokenized = torch.zeros(numtokens)
+	for i=1,numtokens do
+		tokenized[i] = s2s.embed[splitstring[i]] or s2s.numkeys
+		if tokenized[i] == s2s.numkeys and s2s.conv_verbose then
+			print('Machine Subconscious: I did not recognize the word ' .. splitstring[i] .. '.')
+			print()
+		end
 	end
 
-	local tokenized = torch.zeros(numtokens)
-	breakapart = text:gmatch(s2s.pattern)
-	local i = 1
-	for token in breakapart do
-		if s2s.lower then
-			tokenized[i] = s2s.embed[token:lower()] or s2s.numkeys
-		else
-			tokenized[i] = s2s.embed[token] or s2s.numkeys
-		end
-		i = i + 1
-	end
 	return tokenized:long(), numtokens
 end
 
@@ -391,11 +523,11 @@ function sample_from_network(args)
 		if s2s.gpu >=1 then
 			X = X:cuda()
 		end
-		for n=1,X:size()[1] do
+		for n=1,X:size(1)-1 do
 			s2s.RNN:forward({hcur,X[n]})
 			hcur = s2s.RNN.output[1]
 		end
-		xcur[s2s.embed['\n']] = 1
+		xcur = X[X:size(1)]
 	end
 
 	local function next_character(pred)
@@ -420,7 +552,13 @@ function sample_from_network(args)
 			i, next_text = next_character(pred)
 			xcur:zero()
 			xcur[i] = 1
-			sample_text = sample_text .. next_text
+			if s2s.pattern == 'word' then
+				if not(i==s2s.numkeys) then
+					sample_text = sample_text .. ' ' .. next_text
+				end
+			else
+				sample_text = sample_text .. next_text
+			end
 		end
 	else
 		repeat
@@ -430,7 +568,13 @@ function sample_from_network(args)
 			i, next_text = next_character(pred)
 			xcur:zero()
 			xcur[i] = 1
-			sample_text = sample_text .. next_text
+			if s2s.pattern == 'word' then
+				if not(i==s2s.numkeys) then
+					sample_text = sample_text .. ' ' .. next_text
+				end
+			else
+				sample_text = sample_text .. next_text
+			end
 		until next_text == '\n'	-- output character is unknown/EOS
 	end
 
@@ -449,9 +593,9 @@ function test_conv(temperature)
 		io.write('\n')
 		io.flush()
 		if not(user_input) then
-			user_input = '\n'
+			user_input = ' '
 		end
-		args = {hcur = hcur, toscreen=false, primetext = user_input, temperature = temperature}
+		args = {hcur = hcur, toscreen=false, primetext = user_input .. '\n', temperature = temperature}
 		--if length then args.length = length end
 		machine_output, hcur = sample_from_network(args)
 		io.write('Machine: ' .. machine_output .. '\n')
@@ -466,7 +610,17 @@ function memory()
 	print(free/tot)
 end
 
-function load(filename)
+function load(filename,gpu)
+	-- check some requirements before loading
+	local gpu = gpu or -1
+	if gpu>=0 then
+		require 'cutorch'
+		require 'cunn'
+	end
+	require 'LSTM'
+	require 'GRU'
+	require 'VanillaRNN'
+
 	T = torch.load(filename)
 	s2s = T.s2s
 	init(s2s)
