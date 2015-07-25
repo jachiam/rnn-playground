@@ -240,11 +240,7 @@ function minibatch_loader()
 			i = s2s.pos_in_text
 		end
 		preX = s2s.tokenized[{{i,i + s2s.seq_len - 1}}]:long()
-		if s2s.input_mode == 1 then
-			postX = s2s.eye:index(1,preX)
-		else
-			postX = s2s.lookup:forward(preX)
-		end
+		postX = s2s.eye:index(1,preX)
 		I[{{},{n}}]:copy(preX)
 		X[{{},{n}}]:copy(postX)
 		Y[{{},{n}}] = s2s.tokenized[{{i+1,i + s2s.seq_len}}]
@@ -398,7 +394,6 @@ function sample_from_network(args)
 			i, next_text = next_character(pred)
 			xcur:zero()
 			xcur[i] = 1
-			end
 			if s2s.pattern == 'word' then
 				if not(i==s2s.numkeys) then
 					sample_text = sample_text .. ' ' .. next_text
