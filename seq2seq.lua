@@ -1,6 +1,7 @@
 require 'torch'
 require 'nn'
 require 'nngraph'
+require 'data_processing'
 local model_utils = require 'model_utils'
 package.path = package.path .. ";./network/?.lua"
 
@@ -54,7 +55,7 @@ function init(args)
 	s2s.noclones = args.noclones or false
 
 	-- RMSprop and clipping gradients
-	s2s.lr = args.lr or 0.01		-- learning rate
+	s2s.lr = args.lr or 0.001		-- learning rate
 	s2s.lambda = args.lambda or 1e-8
 	s2s.gamma = args.gamma or 0.95
 	s2s.grad_clip = args.grad_clip or true
@@ -75,10 +76,14 @@ function init(args)
 	print('Creating embedding/deembedding tables for characters in data...')
 	s2s.embed, s2s.deembed, s2s.numkeys, s2s.numwords, s2s.tokenized, s2s.freq_data = data_processing(s2s.rawdata,s2s.pattern,s2s.lower,s2s.wordopt)
 	s2s.numkeys = s2s.numkeys + 1 		-- for unknown character
-	s2s.eye = torch.eye(s2s.numkeys)
 	print('Finished making embed/deembed tables.') 
 	print('Finished making embedded data.')
 	print('Dictionary has this many words in it: ',s2s.numkeys)
+
+	-- Input mode things
+	s2s.eye = torch.eye(s2s.numkeys)
+	s2s.decoder = true
+	s2s.rnn_input_size = s2s.numkeys
 
 	-- Networks and parameters
 	s2s.layer_sizes = args.layer_sizes or {128}
@@ -88,6 +93,7 @@ function init(args)
 
 	s2s.RNN_type = args.RNN_type or 'LSTM'
 
+	-- Interpret RNN_type options and compute length of hidden state vector
 	if s2s.RNN_type == 'LSTM' then
 		print('Making LSTM...')
 		for i=1,#s2s.layer_sizes do s2s.n_hidden = s2s.n_hidden + 2*s2s.layer_sizes[i] end
@@ -102,19 +108,22 @@ function init(args)
 		require 'VanillaRNN'
 	end
 
-	clones = {}
+	-- Build RNN and make references to its parameters and gradient
 	if args.RNN then
 		s2s.RNN = args.RNN
 	elseif s2s.RNN_type == 'LSTM' then
-		s2s.RNN = LSTM(s2s.numkeys,s2s.layer_sizes,{peepholes=s2s.peepholes,decoder=true,fgate_init=true})
+		s2s.RNN = LSTM(s2s.rnn_input_size,s2s.layer_sizes,{peepholes=s2s.peepholes,decoder=s2s.decoder,fgate_init=true})
 	elseif s2s.RNN_type == 'GRU' then
-		s2s.RNN = GRU(s2s.numkeys,s2s.layer_sizes,{decoder=true})
+		s2s.RNN = GRU(s2s.rnn_input_size,s2s.layer_sizes,{decoder=s2s.decoder})
 	elseif s2s.RNN_type == 'Vanilla' then
-		s2s.RNN = VanillaRNN(s2s.numkeys,s2s.layer_sizes,{decoder=true,nl_type=s2s.nl_type})
+		s2s.RNN = VanillaRNN(s2s.rnn_input_size,s2s.layer_sizes,{decoder=s2s.decoder,nl_type=s2s.nl_type})
 	end
 	if s2s.gpu >= 0 then s2s.RNN:cuda() end
 	s2s.params, s2s.gradparams = s2s.RNN:getParameters()
 	s2s.v = s2s.gradparams:clone():zero()
+
+	-- Make RNN clones, if applicable
+	clones = {}
 	if not(s2s.noclones) then
 		print('Cloning RNN...')
 		clones.RNN = model_utils.clone_many_times(s2s.RNN,s2s.seq_len)
@@ -128,6 +137,7 @@ function init(args)
 	criterion_input_2 = nn.Identity()()
 	criterion_out = nn.ClassNLLCriterion()({nn.LogSoftMax()(criterion_input_1),criterion_input_2})
 	s2s.criterion = nn.gModule({criterion_input_1,criterion_input_2},{criterion_out})
+
 	if s2s.gpu >= 0 then s2s.criterion:cuda() end
 	if not(s2s.noclones) then
 		print('Cloning criterion...')
@@ -142,181 +152,6 @@ function init(args)
 	end
 	print('Number of trainable parameters: ', s2s.params:nElement())
 
-end
-
-
--- DATA MANIPULATION FUNCTIONS
-function data(filename)
-	local f = torch.DiskFile(filename)
-	local rawdata = f:readString('*a')
-	f:close()
-	return rawdata
-end
-
-function split_string(rawdata,pattern,lower,wordopt)
-	local replace 
-	if wordopt then
-		replace = wordopt.replace or false
-	end
-	if pattern == 'word' then
-		--ptrn = '%w+\'?%w*[%s%p]'
-		ptrn = '[^%s]+\n?'
-	else
-		ptrn = pattern
-	end
-	local breakapart = rawdata:gmatch(ptrn)
-	local splitstring = {}
-	local tokens = {}
-	for elem in breakapart do
-		tokens = {}
-		if lower then elem = elem:lower() end
-		if pattern == 'word' then
-			local pref = {}
-			local front = elem
-			local back = {}
-
-			--[[ strip off newline characters
-			back[1] = elem:sub(elem:len(),elem:len())
-			if back[1] == '\n' then 
-				front = elem:sub(1,elem:len()-1)
-			else
-				front = elem
-			end]]
-
-			-- strip of punctuation characters and newlines
-			for i=1,front:len() do
-				local prevchar = front:sub(1,1)
-				if prevchar:match('[%p\n]') then
-					table.insert(pref,prevchar)
-					front = front:sub(2,front:len())
-				else
-					break
-				end
-			end
-			for i=front:len(),1,-1 do
-				local lastchar = front:sub(front:len(),front:len())
-				if lastchar:match('[%p\n]') then
-					table.insert(back,lastchar)
-					front = front:sub(1,front:len()-1)
-				else
-					break
-				end
-			end
-
-			-- prefix characters/punctuation to tokens
-			for i=1,#pref do
-				tokens[#tokens+1] = pref[i]
-			end
-
-			-- word to token
-			-- time for some common replacements!
-			if replace and front then
-				local asplit = {}
-				local ba = front:gmatch('[^\']+')
-				for a in ba do
-					table.insert(asplit,a)
-				end
-				local replaceflag = false
-				if #asplit > 1 then
-					local prev = asplit[#asplit-1]:lower()
-					local last = asplit[#asplit]:lower()
-					if last == 'll' then
-						asplit[#asplit] = 'will'
-						replaceflag = true
-					elseif last == 'm' then
-						asplit[#asplit] = 'am'
-						replaceflag = true
-					elseif last == 've' then
-						asplit[#asplit] = 'have'
-						replaceflag = true
-					elseif last == 're' then
-						asplit[#asplit] = 'are'
-						replaceflag = true
-					elseif last == 's' then
-						if prev == 'he' or prev == 'she' 
-							or prev == 'that' or prev == 'this'
-							or prev == 'it' or prev == 'how' 
-							or prev == 'why' or prev == 'who'
-							or prev == 'when' or prev == 'what' then
-							asplit[#asplit] = 'is'
-							replaceflag = true
-						end
-					end
-				end
-				if not(replaceflag) then
-					tokens[#tokens+1] = front
-				else
-					for i=1,#asplit do
-						tokens[#tokens+1] = asplit[i]
-					end
-				end
-			else
-				tokens[1] = front
-			end
-
-			--suffic characters/punctuation to tokens
-			for i=#back,1,-1 do
-				tokens[#tokens+1] = back[i]
-			end
-		else
-			tokens[1] = elem
-		end
-		for i,v in pairs(tokens) do table.insert(splitstring,tokens[i]) end
-	end
-	return splitstring
-end
-
-function data_processing(rawdata,pattern,lower,wordopt)
-	local usemostcommon = false
-	local useNmostcommon = 4500
-	if wordopt then
-		usemostcommon = wordopt.usemostcommon or false
-		useNmostcommon = wordopt.useNmostcommon or 4500
-	end
-	local embeddings = {}
-	local deembeddings = {}
-	local freq = {}
-	local numkeys = 0
-	local numwords = 0
-
-	-- split the string and make embeddings/deembeddings/freq
-	local splitstring = split_string(rawdata,pattern,lower,wordopt)
-	numwords = #splitstring
-	tokenized = torch.zeros(numwords)
-	for i=1,numwords do
-		if not embeddings[splitstring[i]] then
-			numkeys = numkeys + 1
-			embeddings[splitstring[i]] = numkeys
-			deembeddings[numkeys] = splitstring[i]
-			freq[numkeys] = {1,numkeys}
-		else
-			freq[embeddings[splitstring[i]]][1] = freq[embeddings[splitstring[i]]][1] + 1
-		end
-		tokenized[i] = embeddings[splitstring[i]]
-	end
-
-	-- only take the most frequent entries
-	local num_represented = 0
-	if usemostcommon then
-		numkeys = math.min(numkeys,useNmostcommon)
-		table.sort(freq,function(a,b) return a[1]>b[1] end)
-		local new_embed = {}
-		local new_deembed = {}
-		for i=1,numkeys do
-			new_deembed[i] = deembeddings[freq[i][2]]
-			new_embed[new_deembed[i]] = i
-			num_represented = num_represented + freq[i][1]
-		end
-		embeddings = new_embed
-		deembeddings = new_deembed
-		print('Dictionary captures about ', 100*num_represented/numwords, '% of text.')
-		-- rebuild tokenized:
-		for i=1,numwords do
-			tokenized[i] = embeddings[splitstring[i]] or numkeys + 1
-		end
-	end
-
-	return embeddings, deembeddings, numkeys, numwords, tokenized, freq
 end
 
 
@@ -336,6 +171,7 @@ end
 function bwd()
 	for i=s2s.seq_len,1,-1 do
 		clones.criterion[i]:backward({clones.RNN[i].output[2],Y[i]},{1})
+
 		if i < s2s.seq_len then
 			clones.RNN[i]:backward({H[i],X[i]},{
 				clones.RNN[i+1].gradInput[1],
@@ -347,6 +183,7 @@ function bwd()
 				clones.criterion[i].gradInput[1]
 				})
 		end
+
 		if s2s.collect_often then collectgarbage() end
 	end
 end
@@ -384,8 +221,9 @@ end
 -- Second is element-in-batch
 function minibatch_loader()
 	local i
-	local preX
-	local X = torch.Tensor(s2s.seq_len,s2s.batch_size,s2s.numkeys):zero()
+	local preX,postX
+	local I = torch.Tensor(s2s.seq_len,s2s.batch_size):zero():long()
+	local X = torch.Tensor(s2s.seq_len,s2s.batch_size,s2s.rnn_input_size):zero()
 	local Y = torch.Tensor(s2s.seq_len,s2s.batch_size):zero()
 	local H = torch.Tensor(s2s.seq_len,s2s.batch_size,s2s.n_hidden):zero()
 
@@ -402,7 +240,13 @@ function minibatch_loader()
 			i = s2s.pos_in_text
 		end
 		preX = s2s.tokenized[{{i,i + s2s.seq_len - 1}}]:long()
-		X[{{},{n}}]:copy(s2s.eye:index(1,preX))
+		if s2s.input_mode == 1 then
+			postX = s2s.eye:index(1,preX)
+		else
+			postX = s2s.lookup:forward(preX)
+		end
+		I[{{},{n}}]:copy(preX)
+		X[{{},{n}}]:copy(postX)
 		Y[{{},{n}}] = s2s.tokenized[{{i+1,i + s2s.seq_len}}]
 		if s2s.training_mode == 2 then
 			s2s.pos_in_text = s2s.pos_in_text + s2s.seq_len
@@ -418,12 +262,12 @@ function minibatch_loader()
 		H = H:float():cuda()
 	end
 
-	return X,Y,H
+	return X,Y,H,I
 end
 
 
 function train_network_one_step()
-	X,Y,H = minibatch_loader()
+	X,Y,H,I = minibatch_loader()
 	s2s.gradparams:zero()
 
 	if s2s.noclones then
@@ -445,6 +289,7 @@ function train_network_one_step()
 	s2s.v:mul(s2s.gamma):add(grad)
 	s2s.gradparams:cdiv(torch.sqrt(s2s.v):add(s2s.lambda))
 	s2s.params:add(-s2s.lr,s2s.gradparams)
+
 	collectgarbage()
 end
 
@@ -492,11 +337,11 @@ function tokenize_string(text)
 	return tokenized:long(), numtokens
 end
 
-function string_to_one_hot(text)
+function string_to_rnn_input(text)
 	local tokenized, numtokens = tokenize_string(text)
-	local one_hots = torch.zeros(numtokens,s2s.numkeys)
-	one_hots:copy(s2s.eye:index(1,tokenized))
-	return one_hots
+	local X = torch.zeros(numtokens,s2s.rnn_input_size)
+	X:copy(s2s.eye:index(1,tokenized))
+	return X
 end
 
 function sample_from_network(args)
@@ -506,8 +351,9 @@ function sample_from_network(args)
 	local primetext = args.primetext
 	sample_text = ''
 
-	xcur = torch.Tensor(s2s.numkeys):zero()
+	xcur = torch.Tensor(s2s.rnn_input_size):zero()
 	hcur = args.hcur or torch.Tensor(s2s.n_hidden):zero()
+
 	softmax = nn.SoftMax()
 	if s2s.gpu >= 1 then
 		xcur = xcur:float():cuda()
@@ -519,7 +365,7 @@ function sample_from_network(args)
 		i = torch.ceil(torch.uniform()*s2s.numkeys)
 		xcur[i] = 1
 	else
-		X = string_to_one_hot(primetext)
+		X = string_to_rnn_input(primetext)
 		if s2s.gpu >=1 then
 			X = X:cuda()
 		end
@@ -552,6 +398,7 @@ function sample_from_network(args)
 			i, next_text = next_character(pred)
 			xcur:zero()
 			xcur[i] = 1
+			end
 			if s2s.pattern == 'word' then
 				if not(i==s2s.numkeys) then
 					sample_text = sample_text .. ' ' .. next_text
