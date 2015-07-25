@@ -41,7 +41,7 @@ function init(args)
 
 	-- Verbosity
 	s2s.report_freq = args.report_freq or 10
-	s2s.conv_verbose = false
+	s2s.conv_verbose = args.conv_verbose or false
 
 	-- Computational
 	s2s.gpu = args.gpu or -1
@@ -78,7 +78,7 @@ function init(args)
 	s2s.numkeys = s2s.numkeys + 1 		-- for unknown character
 	print('Finished making embed/deembed tables.') 
 	print('Finished making embedded data.')
-	print('Dictionary has this many words in it: ',s2s.numkeys)
+	print('Dictionary has this many keys in it: ',s2s.numkeys)
 
 	-- Input mode things
 	s2s.eye = torch.eye(s2s.numkeys)
@@ -121,30 +121,29 @@ function init(args)
 	if s2s.gpu >= 0 then s2s.RNN:cuda() end
 	s2s.params, s2s.gradparams = s2s.RNN:getParameters()
 	s2s.v = s2s.gradparams:clone():zero()
-
-	-- Make RNN clones, if applicable
-	clones = {}
-	if not(s2s.noclones) then
-		print('Cloning RNN...')
-		clones.RNN = model_utils.clone_many_times(s2s.RNN,s2s.seq_len)
-		collectgarbage()
-	end
 	print('RNN is done.')
 
+	-- Make criterion
 	print('Making criterion...')
 	local criterion_input_1, criterion_input_2, criterion_out
 	criterion_input_1 = nn.Identity()()
 	criterion_input_2 = nn.Identity()()
 	criterion_out = nn.ClassNLLCriterion()({nn.LogSoftMax()(criterion_input_1),criterion_input_2})
 	s2s.criterion = nn.gModule({criterion_input_1,criterion_input_2},{criterion_out})
-
 	if s2s.gpu >= 0 then s2s.criterion:cuda() end
+	print('Criterion is done.')
+
+	-- Make RNN/criterion clones, if applicable
 	if not(s2s.noclones) then
+		clones = {}
+		print('Cloning RNN...')
+		clones.RNN = model_utils.clone_many_times(s2s.RNN,s2s.seq_len)
+		collectgarbage()
 		print('Cloning criterion...')
 		clones.criterion = model_utils.clone_many_times(s2s.criterion,s2s.seq_len)
 		collectgarbage()
+		print('Clones are done.')
 	end
-	print('Criterion is done.')
 	
 	if s2s.gpu >=0 then
 		free,tot = cutorch.getMemoryUsage()
@@ -157,7 +156,7 @@ end
 
 -- TRAINING
 
-function fwd()
+function grad_pass_with_clones()
 	total_loss = 0
 	for i=1,s2s.seq_len do
 		clones.RNN[i]:forward({H[i],X[i]})
@@ -166,24 +165,16 @@ function fwd()
 		total_loss = total_loss + loss[1]
 	end
 	if s2s.collect_often then collectgarbage() end
-end
 
-function bwd()
+	local gradH
 	for i=s2s.seq_len,1,-1 do
 		clones.criterion[i]:backward({clones.RNN[i].output[2],Y[i]},{1})
-
 		if i < s2s.seq_len then
-			clones.RNN[i]:backward({H[i],X[i]},{
-				clones.RNN[i+1].gradInput[1],
-				clones.criterion[i].gradInput[1]
-				})
+			gradH = clones.RNN[i+1].gradInput[1]
 		else
-			clones.RNN[i]:backward({H[i],X[i]},{
-				torch.Tensor():typeAs(H[i]):resizeAs(H[i]):zero(),
-				clones.criterion[i].gradInput[1]
-				})
+			gradH = torch.Tensor():typeAs(H[i]):resizeAs(H[i]):zero()
 		end
-
+		clones.RNN[i]:backward({H[i],X[i]},{gradH,clones.criterion[i].gradInput[1]})
 		if s2s.collect_often then collectgarbage() end
 	end
 end
@@ -269,8 +260,7 @@ function train_network_one_step()
 	if s2s.noclones then
 		grad_pass_no_clones()
 	else
-		fwd()
-		bwd()
+		grad_pass_with_clones()
 	end
 
 	-- Average over batch and sequence length
@@ -343,7 +333,8 @@ end
 function sample_from_network(args)
 	local X, xcur, hcur
 	local length = args.length
-	local toscreen = args.toscreen or false
+	local chatmode = args.chatmode or false
+	local toscreen = args.toscreen or not(chatmode)
 	local primetext = args.primetext
 	sample_text = ''
 
@@ -386,44 +377,37 @@ function sample_from_network(args)
 		return i, next_text
 	end
 
-	if length then
-		for n=1,length do
-			s2s.RNN:forward({hcur,xcur})
-			hcur = s2s.RNN.output[1]
-			pred = s2s.RNN.output[2]
-			i, next_text = next_character(pred)
-			xcur:zero()
-			xcur[i] = 1
-			if s2s.pattern == 'word' then
-				if not(i==s2s.numkeys) then
-					sample_text = sample_text .. ' ' .. next_text
-				end
-			else
-				sample_text = sample_text .. next_text
+	local n = 1
+	repeat
+		s2s.RNN:forward({hcur,xcur})
+		hcur = s2s.RNN.output[1]
+		pred = s2s.RNN.output[2]
+		i, next_text = next_character(pred)
+		xcur:zero()
+		xcur[i] = 1
+		if s2s.pattern == 'word' then
+			if not(i==s2s.numkeys) then
+				sample_text = sample_text .. ' ' .. next_text
 			end
+		else
+			sample_text = sample_text .. next_text
 		end
-	else
-		repeat
-			s2s.RNN:forward({hcur,xcur})
-			hcur = s2s.RNN.output[1]
-			pred = s2s.RNN.output[2]
-			i, next_text = next_character(pred)
-			xcur:zero()
-			xcur[i] = 1
-			if s2s.pattern == 'word' then
-				if not(i==s2s.numkeys) then
-					sample_text = sample_text .. ' ' .. next_text
-				end
-			else
-				sample_text = sample_text .. next_text
-			end
-		until next_text == '\n'	-- output character is unknown/EOS
-	end
+		if length then 
+			end_condition = (n==length)
+			n = n + 1
+		else
+			end_condition = (next_text == '\n')	-- output character is unknown/EOS
+		end
+	until end_condition
 
 	if toscreen then
 		print('Sample text: ',sample_text)
 	end
-	return sample_text, hcur
+	if chatmode then
+		return sample_text, hcur
+	else
+		return sample_text
+	end
 end
 
 function test_conv(temperature)
@@ -437,7 +421,7 @@ function test_conv(temperature)
 		if not(user_input) then
 			user_input = ' '
 		end
-		args = {hcur = hcur, toscreen=false, primetext = user_input .. '\n', temperature = temperature}
+		args = {hcur = hcur, chatmode=true, primetext = user_input .. '\n', temperature = temperature}
 		--if length then args.length = length end
 		machine_output, hcur = sample_from_network(args)
 		io.write('Machine: ' .. machine_output .. '\n')

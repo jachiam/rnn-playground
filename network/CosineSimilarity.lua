@@ -23,6 +23,9 @@ function cosines:updateOutput(input)
 	-- key embedding W[j]. That is, C[i,j] = dot(W[j],X[i]) / |W[j]|.
 	local W, X = input[1], input[2]
 
+	if W:dim() == 1 then W:resize(1,W:size(1)) end
+	if X:dim() == 1 then X:resize(1,X:size(1)) end
+
 	local w = W:clone()
 	w = w:cmul(w):sum(2)
 	self.wc = w:sqrt()
@@ -50,6 +53,9 @@ end
 
 function cosines:updateGradInput(input,gradOutput)
 	local W,X = input[1],input[2]
+
+	if W:dim() == 1 then W:resize(1,W:size(1)) end
+	if X:dim() == 1 then X:resize(1,X:size(1)) end
 
 	-- oh man. OH MAN. are you ready for a bunch of ugly matrix ops?
 	-- because i know i am.
@@ -98,10 +104,10 @@ function cosines:updateGradInput(input,gradOutput)
 	local g1a,g1b,g1c,g1d
 	if self.divbyx then
 		-- First, backwards through the expand:
-		g1d = glw:sum(2)
+		g1d = glx:sum(2)
 		-- Next, backwards through the sqrt:
 		-- for y=sqrt(x), dy/dx = (1/2)(1/y)
-		g1c = g1d:cmul(self.xc:pow(-1)):mul(0.5)
+		g1c = g1d:cmul(self.xc:clone():pow(-1)):mul(0.5)
 		-- Backwards through the sum:
 		g1b = g1c:expandAs(X)
 		-- Backwards through the squaring:
@@ -118,7 +124,7 @@ function cosines:updateGradInput(input,gradOutput)
 	g2d = glw:sum(1)
 	-- Next, backwards through the sqrt:
 	-- for y=sqrt(x), dy/dx = (1/2)(1/y)
-	g2c = g2d:cmul(self.wc:pow(-1)):mul(0.5):t()
+	g2c = g2d:cmul(self.wc:clone():pow(-1)):mul(0.5):t()
 	-- Backwards through the sum:
 	g2b = g2c:expandAs(W)
 	-- Backwards through the squaring:
