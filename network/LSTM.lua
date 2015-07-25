@@ -12,19 +12,6 @@ function LSTM(input_dim,layer_sizes,opt)
 	local decoder = opt.decoder or false
 	local fgate_init = opt.fgate_init or false
 
-	-- There are two inputs. The hidden state (a vector which includes
-	-- the hidden state at /every/ level, and the memory cells), and the 
-	-- external input.
-
-	-- There'll be two outputs: the first output will be the complete updated 
-	-- hidden state (including the hidden state at every level, plus memory cells)
-	-- which you can then feed back into the LSTM as input. The second is an 
-	-- "external output," which will be the last layer's hidden state 
-	-- (but not its memory cell), unless the decoder flag is up. If the decoder flag
-	-- is up, then we add a final linear layer to the LSTM, of dimension input_dim.
-	-- The external output is ostensibly what we will send as input to the next network,
-	-- or to the cost function. 
-
 	local inputs = {}
 	inputs[1] = nn.Identity()()	-- Hidden state input
 	inputs[2] = nn.Identity()()	-- External input
