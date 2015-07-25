@@ -13,7 +13,6 @@ function split_string(rawdata,pattern,lower,wordopt)
 		replace = wordopt.replace or false
 	end
 	if pattern == 'word' then
-		--ptrn = '%w+\'?%w*[%s%p]'
 		ptrn = '[^%s]+\n?'
 	else
 		ptrn = pattern
@@ -29,15 +28,7 @@ function split_string(rawdata,pattern,lower,wordopt)
 			local front = elem
 			local back = {}
 
-			--[[ strip off newline characters
-			back[1] = elem:sub(elem:len(),elem:len())
-			if back[1] == '\n' then 
-				front = elem:sub(1,elem:len()-1)
-			else
-				front = elem
-			end]]
-
-			-- strip of punctuation characters and newlines
+			-- strip off punctuation characters and newlines
 			for i=1,front:len() do
 				local prevchar = front:sub(1,1)
 				if prevchar:match('[%p\n]') then
