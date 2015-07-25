@@ -16,6 +16,8 @@ Vanilla RNN and Gated Recurrent Unit implementations are also present and usable
 
 I've also made a couple of potentially useful utility layers. Joinlayer and Splitlayer respectively concatenate a table of vectors into one large vector, and split one large vector into a table of smaller vectors. They are probably not maximally memory efficient, but eh, I'll get around to that eventually. I really should have done the splitting with narrows, but, again, eventually. There is also an unbiased linear layer in here (a linear layer with just a weight matrix, and no bias). This is useful if, for instance, you are making gated units, and there should only be one bias per gate instead of two (which is the case in some of the LSTM examples I have seen out there). There's also CosineSimilarity, which I was going to use for something but never got around to it. 
 
+For training, there are two modes, controlled by the xrnn.training_mode variable. In mode 2, you proceed linearly through the text corpus. In mode 1, you randomly sample sequences from anywhere in the text corpus as you train. If your corpus is very different in different places, the random sampling might help smooth things out during training.
+
 Also, if you want to split your raw text into word tokens instead of characters, I have made that particularly easy. Just use pattern='word' as one of the options. But, uh, to note, that one does not seem to go over super great during training. I'll try adding some better support for it later
 
 So, none of this is really, uh, user friendly yet. If you want to use it, here's how you do:
@@ -43,7 +45,7 @@ Saving is easy: just do 'save(filename)'. Loading is also easy: 'load(filename)'
 
 I can take requests for additional features. I guess a command line option might be popular? I don't know, I like working with it directly in torch. Get to play with the guts of it while I am going.
 
-
+There are no validation statistics in this - for a scientist, I was a very bad scientist about this. Maybe I'll add it in later. But I haven't had any troubles with overfitting yet.
 
 
 * A corpus of chat data - to play nicely with this code - should be a text file where every line is a chatroom message. (Scrub off usernames, timestamps, all that jazz. Just messages separated by linebreaks.)
