@@ -6,7 +6,7 @@ So, uh, this whole thing is still kind of under construction. This is not a well
 
 This is a code for building and training RNNs to learn and generate text. Character stuff is easiest, although you can change the matching pattern. (For example, you could learn two-characters at a time, or ignore all punctuation, and so on.) 
 
-This is basically a poor man's version of Andrej Karpathy's char-RNN, which came out earlier this summer, and was awesome. (In fact, I have flat-out ripped off his model_utils file with no modification. The credit and glory here is not all mine.) I spent a good chunk of time learning how to do things in Torch from his and other examples. 
+This is basically a poor man's version of Andrej Karpathy's char-RNN, which came out earlier this summer, and was awesome. (In fact, I have flat-out ripped off his model_utils file with no modification. The credit and glory here is not all mine.) I spent a good chunk of time learning how to do things in Torch from his and other examples. Originally, I was planning on doing sequence-to-sequence learning (http://papers.nips.cc/paper/5346-sequence-to-sequence-learning-with-neural-networks.pdf), but that is a little ambitious for this very modest code, so I'm going to do that in another codebase.
 
 But, there are some things I've done here which you may find interesting/useful! 
 
@@ -22,7 +22,7 @@ So, none of this is really, uh, user friendly yet. If you want to use it, here's
 
 1. Fire up torch.
 
-2. require 'seq2seq'
+2. require 'rnn_playground'
 
 3. build out your list of args, read comments in seq2seq to see what your options are. you can omit any options and it will default to something safe and simple, though.
 
@@ -34,7 +34,7 @@ So, none of this is really, uh, user friendly yet. If you want to use it, here's
 
 7. to sample, run 'sample_from_network({length=$some_number})' with some number as the argument
 
-8. if you trained it on a corpus of chat data, try 'test_conv(temperature)' to chat with it!
+8. if you trained it on a corpus of chat data*, try 'test_conv(temperature)' to chat with it!
 temperature is a parameter between 0 and 1, which sharpens the probability distribution as you lower it.
 that is, it becomes more deterministic for lower temperatures, and more random for higher temps.
 I find that temps around 0.65-0.85 are nice.
@@ -42,3 +42,8 @@ I find that temps around 0.65-0.85 are nice.
 Saving is easy: just do 'save(filename)'. Loading is also easy: 'load(filename)' does it. But if you want to make a new network with the same options as an old network, do 'loadFromOptions(filename)' and that will do!
 
 I can take requests for additional features. I guess a command line option might be popular? I don't know, I like working with it directly in torch. Get to play with the guts of it while I am going.
+
+
+
+
+* A corpus of chat data - to play nicely with this code - should be a text file where every line is a chatroom message. (Scrub off usernames, timestamps, all that jazz. Just messages separated by linebreaks.)
