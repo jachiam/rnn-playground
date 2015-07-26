@@ -26,7 +26,7 @@ So, none of this is really, uh, user friendly yet. If you want to use it, here's
 
 2. require 'rnn_playground'
 
-3. build out your list of args, read comments in seq2seq to see what your options are. you can omit any options and it will default to something safe and simple, though.
+3. build out your list of args, read comments in rnn_playground.lua to see what your options are. you can omit any options and it will default to something safe and simple, though.
 
 4. init(args)
 
