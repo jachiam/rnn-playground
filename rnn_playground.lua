@@ -424,7 +424,7 @@ function sample_from_network(args)
 			end_condition = (n==length)
 			n = n + 1
 		else
-			end_condition = (next_text == '\n')	-- output character is unknown/EOS
+			end_condition = not(not(next_text:match('\n')))	-- output character includes linebreak
 		end
 	until end_condition
 
